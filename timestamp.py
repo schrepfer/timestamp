@@ -450,7 +450,7 @@ def main(args):
   for i, query in enumerate(args.query):
     query = query.strip()
     found = False
-    for priority, patterns in sorted(PATTERNS.iteritems()):
+    for priority, patterns in sorted(PATTERNS.items()):
       for pattern, parser in patterns:
         match = re.match(pattern, query)
         if match:
