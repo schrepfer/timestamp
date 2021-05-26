@@ -6,6 +6,7 @@ __author__ = 'schrepfer'
 
 import argparse
 import calendar
+import collections
 import datetime
 import io
 import locale
@@ -415,6 +416,11 @@ def defineFlags():
       dest='color',
       action='store_false')
   parser.add_argument(
+      '-n', '--sorted',
+      action='store_true',
+      default=False,
+      help='sort the output chronologically')
+  parser.add_argument(
       'query',
       nargs='*',
       type=str,
@@ -453,10 +459,11 @@ class dateTime(object):
       self._now = datetime.datetime.now(tz=self.tzinfo)
     return self._now
 
+Timestamp = collections.namedtuple('Timestamp', ['datetime', 'text', 'index'])
 
 def appendParser(timestamps, timestamp, parser, i, query):
   fmt = '({0}) {1}({2})'.format(i, parser.__name__, query)
-  timestamps.append((timestamp, fmt))
+  timestamps.append(Timestamp(timestamp, fmt, i))
 
 
 def main(args):
@@ -485,12 +492,11 @@ def main(args):
 
   now = dt.now()
   if timestamps:
-    #now = sorted(timestamps)[0]
-    for timestamp in sorted(timestamps, key=lambda x: x[0]):
+    for timestamp in sorted(timestamps, key=lambda x: x.datetime if args.sorted else x.index):
       displayTimestamp(
           now,
-          timestamp[0],
-          timestamp[1],
+          timestamp.datetime,
+          timestamp.text,
           args.fmt,
           args.dest,
           color=args.color)
