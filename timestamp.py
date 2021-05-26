@@ -57,6 +57,8 @@ def register(pattern, priority=0):
 @register(r'^(?P<timestamp>-?\d+(\.\d+)?)$')
 def timeParser(timestamp=0, dt=None):
   timestamp = float(timestamp)
+  if timestamp >= 1e12:
+    return None
   return dt.fromtimestamp(timestamp)
 
 
@@ -69,6 +71,8 @@ def hexTimeParser(timestamp='0', dt=None):
 @register(r'^(?P<timestamp>-?\d{12,})$', priority=-5)
 def timeMsecParser(timestamp=0, dt=None):
   timestamp = float(timestamp)
+  if timestamp >= 1e15:
+    return None
   return dt.fromtimestamp(timestamp / 1e3)
 
 
@@ -140,6 +144,8 @@ def yyyyMmDdHhMmSsParser(year=0, month=0, day=0, hour=0, minute=0, second=0, z=N
   hour = int(hour)
   minute = int(minute)
   second = float(second)
+# if year < 1900:
+#   return None
   if month < 1 or month > 12:
     return None
   if day < 1 or day > 31:
@@ -263,7 +269,6 @@ def futureDeltaParser(count, unit, dt=None):
   return now - timedelta
 
 
-@register(r'', priority=sys.maxsize)
 def unknownParser(dt=None):
   return dt.fromtimestamp(0)
 
@@ -373,6 +378,11 @@ def defineFlags():
       type=int,
       help='the logging verbosity')
   parser.add_argument(
+      '-a', '--all',
+      action='store_true',
+      default=False,
+      help='execute all registered parsers')
+  parser.add_argument(
       '-V', '--version',
       action='version',
       version='%(prog)s version 0.1')
@@ -399,7 +409,7 @@ def defineFlags():
       '-c', '--color',
       action='store_true',
       default=True,
-      help='display colored output.')
+      help='display colored output')
   parser.add_argument(
       '--no-color',
       dest='color',
@@ -444,6 +454,11 @@ class dateTime(object):
     return self._now
 
 
+def appendParser(timestamps, timestamp, parser, i, query):
+  fmt = '({0}) {1}({2})'.format(i, parser.__name__, query)
+  timestamps.append((timestamp, fmt))
+
+
 def main(args):
   dt = dateTime(args.src)
   timestamps = []
@@ -458,12 +473,15 @@ def main(args):
           if not timestamp:
             continue
 
-          fmt = '({0}) {1}({2})'.format(i, parser.__name__, query)
-          timestamps.append((timestamp, fmt))
+          appendParser(timestamps, timestamp, parser, i, query)
           found = True
           break
-      if found:
+
+      if found and not args.all:
         break
+
+    if not found:
+      appendParser(timestamps, unknownParser(dt=dt), unknownParser, i, query)
 
   now = dt.now()
   if timestamps:
