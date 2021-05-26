@@ -125,7 +125,7 @@ class utcOffset(datetime.tzinfo):
 @register(
   r'^(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2})-'
   r'(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}(\.\d+)?)$', priority=-10)
-@register(r'^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})', priority=-10)
+@register(r'^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})$', priority=-10)
 @register(
   r'^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})T'
   r'(?P<hour>\d{2})(?P<minute>\d{2})$')
