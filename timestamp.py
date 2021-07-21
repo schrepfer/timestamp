@@ -370,7 +370,7 @@ def displayTimestamp(now, base, text, fmt, timezone, color=False):
 
 def defineFlags():
   parser = argparse.ArgumentParser(description=__doc__)
-  # See: http://docs.python.org/2/library/argparse.html
+  # See: http://docs.python.org/3/library/argparse.html
   parser.add_argument(
       '-v', '--verbosity',
       action='store',
@@ -420,6 +420,12 @@ def defineFlags():
       action='store_true',
       default=False,
       help='sort the output chronologically')
+  parser.add_argument(
+      '-x', '--hide-now',
+      action='store_false',
+      dest='show_now',
+      default=True,
+      help='suppress the display of now')
   parser.add_argument(
       'query',
       nargs='*',
@@ -502,8 +508,9 @@ def main(args):
           color=args.color)
       print
 
-  displayTimestamp(now, now, 'datetime.datetime.now()',
-                   args.fmt, args.dest, color=args.color)
+  if args.show_now:
+    displayTimestamp(now, now, 'datetime.datetime.now()',
+                    args.fmt, args.dest, color=args.color)
 
   return os.EX_OK
 
