@@ -8,96 +8,39 @@ import argparse
 import calendar
 import collections
 import datetime
+import functools
 import io
-import locale
 import logging
 import os
 import re
 import sys
-import time
+from typing import Optional
+import zoneinfo
 
-import pytz
 import termcolor
 
-PATTERNS = {}
+# pylint: disable=line-too-long
+
+PATTERNS: dict[int, list[str]] = {}
 
 MONTHS = {
-  'Jan': 1,
-  'Feb': 2,
-  'Mar': 3,
-  'Apr': 4,
-  'May': 5,
-  'Jun': 6,
-  'Jul': 7,
-  'Aug': 8,
-  'Sep': 9,
-  'Oct': 10,
-  'Nov': 11,
-  'Dec': 12,
-  }
+    'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4,
+    'May': 5, 'Jun': 6, 'Jul': 7, 'Aug': 8,
+    'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12,
+}
 
 
-def Local():
-  with open('/etc/localtime', 'rb') as f:
-    return pytz.tzfile.build_tzinfo('/etc/localtime', f)
+LOCALTIME = zoneinfo.ZoneInfo('localtime')
+UTC = zoneinfo.ZoneInfo('UTC')
 
 
-Local = Local()
-UTC = pytz.timezone('UTC')
+class UTCOffset(datetime.tzinfo):
+  """UTCOffset creates a configurable UTC offset with provided hours/minutes."""
 
+  hours: int
+  minutes: int
 
-def register(pattern, priority=0):
-  """Decorator for registering parsers."""
-  def wrapper(function):
-    section = PATTERNS.setdefault(priority, [])
-    section.append((pattern, function))
-    return function
-  return wrapper
-
-
-@register(r'^(?P<timestamp>-?\d+(\.\d+)?)$')
-def timeParser(timestamp=0, dt=None):
-  timestamp = float(timestamp)
-  if timestamp >= 1e12:
-    return None
-  return dt.fromtimestamp(timestamp)
-
-
-@register(r'^0x(?P<timestamp>-?[0-9a-f]+)$')
-def hexTimeParser(timestamp='0', dt=None):
-  timestamp = int(timestamp, 16)
-  return dt.fromtimestamp(timestamp)
-
-
-@register(r'^(?P<timestamp>-?\d{12,})$', priority=-5)
-def timeMsecParser(timestamp=0, dt=None):
-  timestamp = float(timestamp)
-  if timestamp >= 1e15:
-    return None
-  return dt.fromtimestamp(timestamp / 1e3)
-
-
-@register(r'^(?P<timestamp>-?\d{15,})$', priority=-10)
-def timeUsecParser(timestamp=0, dt=None):
-  timestamp = float(timestamp)
-  return dt.fromtimestamp(timestamp / 1e6)
-
-
-@register(r'^(?P<timestamp>-?\d{18,})$', priority=-15)
-def timeNsecParser(timestamp=0, dt=None):
-  timestamp = float(timestamp)
-  return dt.fromtimestamp(timestamp / 1e9)
-
-
-@register(r'^0x(?P<timestamp>-?[0-9a-f]{10,})$', priority=-10)
-def hexTimeUsecParser(timestamp='0', dt=None):
-  timestamp = int(timestamp, 16)
-  return dt.fromtimestamp(timestamp / 1e6)
-
-
-class utcOffset(datetime.tzinfo):
-
-  def __init__(self, hours, minutes):
+  def __init__(self, hours: int, minutes: int):
     super(datetime.tzinfo, self).__init__()
     self.hours = hours
     self.minutes = minutes
@@ -114,37 +57,88 @@ class utcOffset(datetime.tzinfo):
         abs(self.hours), abs(self.minutes))
 
 
-@register(
-  r'^(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2}) '
-  r'(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}(\.\d+)?)$', priority=-10)
-@register(r'^(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2})$')
-@register(r'^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})$')
-@register(
-  r'^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2}) '
-  r'(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}(\.\d+)?)$', priority=-10)
-@register(r'^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})$')
-@register(
-  r'^(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2})-'
-  r'(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}(\.\d+)?)$', priority=-10)
-@register(r'^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})$', priority=-10)
-@register(
-  r'^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})T'
-  r'(?P<hour>\d{2})(?P<minute>\d{2})$')
-@register(
-  r'^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})T'
-  r'(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}(\.\d+)?)(?P<z>Z?)$')
-@register(
-  r'^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})T'
-  r'(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}(\.\d+)?)'
-  r'(?P<offset>[+-](?P<offset_hours>\d{2}):(?P<offset_minutes>\d{2}))$')
-def yyyyMmDdHhMmSsParser(year=0, month=0, day=0, hour=0, minute=0, second=0, z=None,
-                         offset=None, offset_hours=0, offset_minutes=0, dt=None):
-  year = int(year)
-  month = int(month)
-  day = int(day)
-  hour = int(hour)
-  minute = int(minute)
-  second = float(second)
+TZInfo = zoneinfo.ZoneInfo | UTCOffset
+
+
+class DateTime(object):
+  """DateTime provides utilities for generating datetime.datetime objects for provided ZoneInfo."""
+
+  tzinfo: zoneinfo.ZoneInfo
+
+  def __init__(self, tz: str):
+    self.tzinfo = zoneinfo.ZoneInfo(tz) if tz else LOCALTIME
+
+  @functools.cache
+  def now(self) -> datetime.datetime:
+    return datetime.datetime.now(tz=self.tzinfo)
+
+  def fromtimestamp(self, timestamp) -> datetime.datetime:
+    return datetime.datetime.fromtimestamp(timestamp, tz=self.tzinfo)
+
+  def datetime(self, year: int, month: int, day: int,
+               hour: int = 0, minute: int = 0, second: int = 0, microsecond: int = 0,
+               tzinfo: Optional[TZInfo] = None) -> datetime.datetime:
+    if not tzinfo:
+      tzinfo = self.tzinfo
+    return datetime.datetime(
+        year, month, day,
+        hour=hour, minute=minute, second=second,
+        microsecond=microsecond, tzinfo=tzinfo)
+
+
+def register(pattern: str, priority: int = 0):
+  """Decorator for registering parsers."""
+  def wrapper(function):
+    section = PATTERNS.setdefault(priority, [])
+    section.append((pattern, function))
+    return function
+  return wrapper
+
+
+@register(r'^(?P<timestamp>-?\d+(\.\d+)?)$')
+def time_parser(dt: DateTime, timestamp: str = '0') -> Optional[datetime.datetime]:
+  ts = float(timestamp)
+  if ts >= 1e12:
+    return None
+  return dt.fromtimestamp(ts)
+
+
+@register(r'^0x(?P<timestamp>-?[0-9a-f]+)$')
+def hex_time_parser(dt: DateTime, timestamp: str = '0') -> Optional[datetime.datetime]:
+  ts = int(timestamp, 16)
+  return dt.fromtimestamp(ts)
+
+
+@register(r'^(?P<timestamp>-?\d{12,})$', priority=-5)
+def time_msec_parser(dt: DateTime, timestamp: str = '0') -> Optional[datetime.datetime]:
+  ts = float(timestamp)
+  if ts >= 1e15:
+    return None
+  return dt.fromtimestamp(ts / 1e3)
+
+
+@register(r'^(?P<timestamp>-?\d{15,})$', priority=-10)
+def time_usec_parser(dt: DateTime, timestamp: str = '0') -> Optional[datetime.datetime]:
+  ts = float(timestamp)
+  return dt.fromtimestamp(ts / 1e6)
+
+
+@register(r'^(?P<timestamp>-?\d{18,})$', priority=-15)
+def time_nsec_parser(dt: DateTime, timestamp: str = '0') -> Optional[datetime.datetime]:
+  ts = float(timestamp)
+  return dt.fromtimestamp(ts / 1e9)
+
+
+@register(r'^0x(?P<timestamp>-?[0-9a-f]{10,})$', priority=-10)
+def hex_time_usec_parser(dt: DateTime, timestamp: str = '0') -> Optional[datetime.datetime]:
+  ts = int(timestamp, 16)
+  return dt.fromtimestamp(ts / 1e6)
+
+
+def datetime_parser(dt: DateTime, year: int = 0, month: int = 0, day: int = 0,
+                    hour: int = 0, minute: int = 0, second: float = 0.0,
+                    offset_hours: int = 0, offset_minutes: int = 0,
+                    z: bool = False) -> Optional[datetime.datetime]:
 # if year < 1900:
 #   return None
   if month < 1 or month > 12:
@@ -154,19 +148,18 @@ def yyyyMmDdHhMmSsParser(year=0, month=0, day=0, hour=0, minute=0, second=0, z=N
   if hour > 23 or minute > 59 or second > 59:
     return None
   microsecond = int(1e6 * (second % 1))
-  second = int(second)
-  tzinfo = UTC if z else None
-  if offset:
-    sign = (-1 if offset.startswith('-') else 1)
-    offset_hours = int(offset_hours) * sign
-    offset_minutes = int(offset_minutes) * sign
-    tzinfo = utcOffset(offset_hours, offset_minutes)
+  isecond = int(second)
+  tzinfo: Optional[TZInfo] = None
+  if offset_hours or offset_minutes:
+    tzinfo = UTCOffset(offset_hours, offset_minutes)
+  elif z:
+    tzinfo = UTC
   try:
     return dt.datetime(
         year, month, day,
         hour=hour,
         minute=minute,
-        second=second,
+        second=isecond,
         microsecond=microsecond,
         tzinfo=tzinfo)
   except ValueError:
@@ -174,111 +167,151 @@ def yyyyMmDdHhMmSsParser(year=0, month=0, day=0, hour=0, minute=0, second=0, z=N
 
 
 @register(
-  r'^(?P<month>Jan(uary)?|Feb(ruary)?|Mar(ch)?|Apr(il)?|May|June?|July?|Aug(ust)?|Sep(tember)?|Oct(ober)?|Nov(ember)?|Dec(ember)?) '
-  r'(?P<day>\d+)(?: (?P<year>\d+))?$')
-def englishParser(year=0, month=0, day=0, dt=None):
-  now = dt.now()
-  year = int(year) if year else now.year
-  month = MONTHS.get(month[:3], 0)
-  day = int(day)
-  return yyyyMmDdHhMmSsParser(year=year, month=month, day=day, dt=dt)
+    r'^(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2}) '
+    r'(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}(\.\d+)?)$', priority=-10)
+@register(r'^(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2})$')
+@register(r'^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})$')
+@register(
+    r'^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2}) '
+    r'(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}(\.\d+)?)$', priority=-10)
+@register(r'^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})$')
+@register(
+    r'^(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2})-'
+    r'(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}(\.\d+)?)$', priority=-10)
+@register(r'^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})$', priority=-10)
+@register(
+    r'^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})T'
+    r'(?P<hour>\d{2})(?P<minute>\d{2})$')
+@register(
+    r'^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})T'
+    r'(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}(\.\d+)?)(?P<z>Z?)$')
+@register(
+    r'^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})T'
+    r'(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}(\.\d+)?)'
+    r'(?P<offset>[+-](?P<offset_hours>\d{2}):(?P<offset_minutes>\d{2}))$')
+def yyyymmdd_hhmmss_parser(dt: DateTime, year: str = '0', month: str = '0', day: str = '0',
+                           hour: str = '0', minute: str = '0', second: str = '0',
+                           offset: str = '', offset_hours: str = '0', offset_minutes: str = '0',
+                           z: Optional[str] = None) -> Optional[datetime.datetime]:
+  sign = 1
+  if offset.startswith('-'):
+    sign = -1
+
+  return datetime_parser(
+      dt,
+      year=int(year),
+      month=int(month),
+      day=int(day),
+      hour=int(hour),
+      minute=int(minute),
+      second=float(second),
+      offset_hours=int(offset_hours) * sign,
+      offset_minutes=int(offset_minutes) * sign,
+      z=bool(z),
+  )
 
 
 @register(
-  r'^(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat) '
-  r'(?P<month>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +'
-  r'(?P<day>\d+) (?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}) '
-  r'(?:[A-Z0-9]+ )?'
-  r'(?P<year>\d{4})$')
-def ctimeParser(year=0, month=0, day=0, hour=0, minute=0, second=0, dt=None):
-  year = int(year)
-  month = MONTHS.get(month[:3], 0)
-  day = int(day)
-  hour = int(hour)
-  minute = int(minute)
-  second = int(second)
-  return yyyyMmDdHhMmSsParser(
-      year=year,
-      month=month,
-      day=day,
-      hour=hour,
-      minute=minute,
-      second=second,
-      dt=dt)
+    r'^(?P<month>Jan(uary)?|Feb(ruary)?|Mar(ch)?|Apr(il)?|May|June?|July?|Aug(ust)?|Sep(tember)?|Oct(ober)?|Nov(ember)?|Dec(ember)?) '
+    r'(?P<day>\d+)(?: (?P<year>\d+))?$')
+def english_parser(dt: DateTime, year: str = '0', month: str = '0', day: str = '0') -> Optional[datetime.datetime]:
+  return datetime_parser(
+      dt,
+      year=int(year) if year else dt.now().year,
+      month=MONTHS.get(month[:3], 0),
+      day=int(day),
+  )
+
+
+@register(
+    r'^(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat) '
+    r'(?P<month>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +'
+    r'(?P<day>\d+) (?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}) '
+    r'(?:[A-Z0-9]+ )?'
+    r'(?P<year>\d{4})$')
+def ctime_parser(dt: DateTime, year: str = '0', month: str = '0', day: str = '0', hour: str = '0', minute: str = '0', second: str = '0') -> Optional[datetime.datetime]:
+  return datetime_parser(
+      dt,
+      year=int(year),
+      month=MONTHS.get(month[:3], 0),
+      day=int(day),
+      hour=int(hour),
+      minute=int(minute),
+      second=int(second),
+  )
 
 
 @register(r'^(?P<month>[01]?[0-9])[-/](?P<day>[0-3]?[0-9])$')
-def monthDayParser(month=0, day=0, dt=None):
-  now = dt.now()
-  return yyyyMmDdHhMmSsParser(
-      year=now.year,
-      month=month,
-      day=day,
-      dt=dt)
+def month_day_parser(dt: DateTime, month: str = '0', day: str = '0') -> Optional[datetime.datetime]:
+  return datetime_parser(
+      dt,
+      year=dt.now().year,
+      month=int(month),
+      day=int(day),
+  )
 
 
 @register(r'^(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}(\.\d+)?)$')
-def hhMmSsParser(hour=0, minute=0, second=0, dt=None):
+def hhmmss_parser(dt: DateTime, hour: str = '0', minute: str = '0', second: str = '0') -> Optional[datetime.datetime]:
   now = dt.now()
-  return yyyyMmDdHhMmSsParser(
+  return yyyymmdd_hhmmss_parser(
       year=now.year,
       month=now.month,
       day=now.day,
       hour=hour,
       minute=minute,
       second=second,
-      dt=dt)
+      dt=dt,
+  )
 
 
 @register(r'^(?P<count>\d+)(?P<unit>[dsmhw]) ?ago$')
 @register(r'^(?P<count>\d+)(?P<unit>d)ays?ago$')
-def deltaParser(count, unit, dt=None):
-  now = dt.now()
-  count = int(count)
+def delta_parser(dt: DateTime, count: str = '0', unit: str = '') -> Optional[datetime.datetime]:
+  n = int(count)
   kwargs = {}
   if unit == 'd':
-    kwargs['days'] = count
+    kwargs['days'] = n
   elif unit == 's':
-    kwargs['seconds'] = count
+    kwargs['seconds'] = n
   elif unit == 'm':
-    kwargs['minutes'] = count
+    kwargs['minutes'] = n
   elif unit == 'h':
-    kwargs['hours'] = count
+    kwargs['hours'] = n
   elif unit == 'w':
-    kwargs['weeks'] = count
+    kwargs['weeks'] = n
   timedelta = datetime.timedelta(**kwargs)
-  return now - timedelta
+  return dt.now() - timedelta
 
 
 @register(r'^in(?P<count>\d+)(?P<unit>[dsmhw]) ?$')
 @register(r'^in(?P<count>\d+)(?P<unit>d)ays?$')
-def futureDeltaParser(count, unit, dt=None):
-  now = dt.now()
-  count = -int(count)
+def future_delta_parser(dt: DateTime, count: str = '0', unit: str = '') -> Optional[datetime.datetime]:
+  n = -int(count)
   kwargs = {}
   if unit == 'd':
-    kwargs['days'] = count
+    kwargs['days'] = n
   elif unit == 's':
-    kwargs['seconds'] = count
+    kwargs['seconds'] = n
   elif unit == 'm':
-    kwargs['minutes'] = count
+    kwargs['minutes'] = n
   elif unit == 'h':
-    kwargs['hours'] = count
+    kwargs['hours'] = n
   elif unit == 'w':
-    kwargs['weeks'] = count
+    kwargs['weeks'] = n
   timedelta = datetime.timedelta(**kwargs)
-  return now - timedelta
+  return dt.now() - timedelta
 
 
-def unknownParser(dt=None):
+def unknown_parser(dt: DateTime) -> Optional[datetime.datetime]:
   return dt.fromtimestamp(0)
 
 
-def uncolored(text, *args, **kwargs):
+def uncolored(text: str, unused_groups) -> str:
   return text
 
 
-def colored(text, groups):
+def colored(text: str, groups) -> str:
   i = 0
   buf = io.StringIO()
   for m in re.finditer(
@@ -315,12 +348,18 @@ VALUE_COLORS = {
 OTHER_COLORS = {
     'default': {'color': 'blue', 'attrs': ['bold']},
     'symbol': {'color': 'green', 'attrs': ['bold']},
- }
+}
 
 
-def displayTimestamp(now, base, text, fmt, timezone, color=False):
+def display_timestamp(
+    now: datetime.datetime,
+    base: datetime.datetime,
+    text: str,
+    fmt: str,
+    timezone: str,
+    color: bool = False) -> None:
   buf = io.StringIO()
-  tzinfo = pytz.timezone(timezone) if timezone else Local
+  tzinfo = zoneinfo.ZoneInfo(timezone) if timezone else LOCALTIME
   timestamp = base.astimezone(tzinfo)
   delta = timestamp - now
   timetuple = timestamp.timetuple()
@@ -368,7 +407,7 @@ def displayTimestamp(now, base, text, fmt, timezone, color=False):
   print(buf.getvalue())
 
 
-def defineFlags():
+def define_flags() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__)
   # See: http://docs.python.org/3/library/argparse.html
   parser.add_argument(
@@ -434,59 +473,37 @@ def defineFlags():
       metavar='QUERY')
 
   args = parser.parse_args()
-  checkFlags(parser, args)
+  check_flags(parser, args)
   return args
 
 
-def checkFlags(parser, args):
+def check_flags(unused_parser: argparse.ArgumentParser, unused_args: argparse.Namespace) -> None:
   # See: http://docs.python.org/2/library/argparse.html#exiting-methods
   return
 
 
-class dateTime(object):
-  def __init__(self, tz):
-    self.tzinfo = pytz.timezone(tz) if tz else Local
-    self._now = None
-
-  def fromtimestamp(self, timestamp):
-    return datetime.datetime.fromtimestamp(timestamp, tz=self.tzinfo)
-
-  def datetime(self, year, month, day, hour=0, minute=0, second=0, microsecond=0, tzinfo=None):
-    if not tzinfo:
-      tzinfo = self.tzinfo
-    return datetime.datetime(
-        year, month, day,
-        hour=hour, minute=minute, second=second,
-        microsecond=microsecond, tzinfo=tzinfo)
-
-  def now(self):
-    # Cache this. Is this what we want to do? Might be weird.
-    if not self._now:
-      self._now = datetime.datetime.now(tz=self.tzinfo)
-    return self._now
-
 Timestamp = collections.namedtuple('Timestamp', ['datetime', 'text', 'index'])
 
-def appendParser(timestamps, timestamp, parser, i, query):
+
+def append_parser(timestamps: list[Timestamp], timestamp: datetime.datetime, parser, i: int, query: str):
   fmt = '({0}) {1}({2})'.format(i, parser.__name__, query)
   timestamps.append(Timestamp(timestamp, fmt, i))
 
 
 def main(args):
-  dt = dateTime(args.src)
+  dt = DateTime(args.src)
   timestamps = []
   for i, query in enumerate(args.query):
     query = query.strip()
     found = False
-    for priority, patterns in sorted(PATTERNS.items()):
+    for _, patterns in sorted(PATTERNS.items()):
       for pattern, parser in patterns:
-        match = re.match(pattern, query)
-        if match:
-          timestamp = parser(dt=dt, **match.groupdict())
+        if m := re.match(pattern, query):
+          timestamp = parser(dt=dt, **m.groupdict())
           if not timestamp:
             continue
 
-          appendParser(timestamps, timestamp, parser, i, query)
+          append_parser(timestamps, timestamp, parser, i, query)
           found = True
           break
 
@@ -494,31 +511,36 @@ def main(args):
         break
 
     if not found:
-      appendParser(timestamps, unknownParser(dt=dt), unknownParser, i, query)
+      append_parser(timestamps, unknown_parser(dt=dt), unknown_parser, i, query)
 
   now = dt.now()
   if timestamps:
     for timestamp in sorted(timestamps, key=lambda x: x.datetime if args.sorted else x.index):
-      displayTimestamp(
+      display_timestamp(
           now,
           timestamp.datetime,
           timestamp.text,
           args.fmt,
           args.dest,
           color=args.color)
-      print
+      print()
 
   if args.show_now:
-    displayTimestamp(now, now, 'datetime.datetime.now()',
-                    args.fmt, args.dest, color=args.color)
+    display_timestamp(
+        now,
+        now,
+        'datetime.datetime.now()',
+        args.fmt,
+        args.dest,
+        color=args.color)
 
   return os.EX_OK
 
 
 if __name__ == '__main__':
-  args = defineFlags()
+  a = define_flags()
   logging.basicConfig(
-      level=args.verbosity,
+      level=a.verbosity,
       datefmt='%Y/%m/%d %H:%M:%S',
       format='[%(asctime)s] %(levelname)s: %(message)s')
-  sys.exit(main(args))
+  sys.exit(main(a))
